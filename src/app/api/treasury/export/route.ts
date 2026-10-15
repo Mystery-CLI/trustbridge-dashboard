@@ -7,7 +7,8 @@ import { assertSameOrigin } from "@/lib/csrf";
 import { prisma } from "@/lib/prisma";
 import { computeReadiness } from "@/lib/readiness";
 import { recordAuditLog } from "@/lib/audit";
-import { assertFreshExport } from "@/lib/stale-export";
+import { evaluateStaleExportGuard } from "@/lib/stale-export";
+import type { ContributorRow } from "@/types";
 import {
   DEFAULT_EXPORT_PAGE_SIZE,
   MAX_EXPORT_PAGE_SIZE,
@@ -157,6 +158,10 @@ export async function POST(request: NextRequest) {
     snapshotAt?: string;
     offset?: number;
     limit?: number;
+    blockWhenStale?: boolean;
+    confirmStale?: boolean;
+    allowStale?: boolean;
+    overrideStale?: boolean;
   };
   const format = body.format ?? "json";
 
@@ -164,25 +169,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       { error: "Unsupported export format" },
       { status: 400 }
-    );
-  }
-
-  const stale = assertFreshExport(body.snapshotAt);
-  if (stale) {
-    await recordAuditLog({
-      action: "treasury.export.stale",
-      actorId: session.user.id,
-      actorLogin: session.user.githubUsername ?? null,
-      metadata: {
-        format,
-        snapshotAt: body.snapshotAt ?? null,
-        reason: stale.reason,
-      },
-    });
-
-    return NextResponse.json(
-      { error: stale.error, reason: stale.reason },
-      { status: 409 }
     );
   }
 
@@ -216,6 +202,51 @@ export async function POST(request: NextRequest) {
   ]);
 
   const contributors = registrations.map(toExportItem);
+
+  const blockWhenStale =
+    body.blockWhenStale !== undefined
+      ? body.blockWhenStale
+      : !(body.confirmStale || body.allowStale || body.overrideStale);
+
+  const staleGuard = evaluateStaleExportGuard(
+    contributors as unknown as ContributorRow[],
+    {
+      snapshotAt: body.snapshotAt,
+      blockWhenStale,
+    }
+  );
+
+  if (staleGuard.blocked) {
+    await recordAuditLog({
+      action: "treasury.export.stale",
+      actorId: session.user.id,
+      actorLogin: session.user.githubUsername ?? null,
+      metadata: {
+        format,
+        snapshotAt: body.snapshotAt ?? null,
+        reason: staleGuard.reason ?? "stale_export",
+        staleCount: staleGuard.staleCount,
+        totalCount: staleGuard.totalCount,
+      },
+    });
+
+    return NextResponse.json(
+      {
+        error:
+          staleGuard.error ??
+          staleGuard.warning ??
+          "Export blocked due to stale data",
+        reason: staleGuard.reason ?? "stale_export",
+        stale: staleGuard.stale,
+        staleCount: staleGuard.staleCount,
+        totalCount: staleGuard.totalCount,
+        stalePercent: staleGuard.stalePercent,
+        warning: staleGuard.warning,
+      },
+      { status: 409 }
+    );
+  }
+
   const readyCount = contributors.filter((c) => c.readiness === "ready").length;
   const notReadyCount = contributors.length - readyCount;
   const nextOffset = offset + contributors.length;
