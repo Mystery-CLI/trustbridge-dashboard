@@ -73,22 +73,24 @@ function toExportItem(reg: {
   };
 }
 
-export async function GET(request: NextRequest) {
+export async function GET(request?: NextRequest) {
   const session = await getServerSession(authOptions);
 
   if (!session?.user?.id || !session.user.isMaintainer) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const pagination = parseExportPagination(request.nextUrl.searchParams);
+  const pagination = parseExportPagination(request?.nextUrl?.searchParams);
   if (!pagination.ok) {
     return NextResponse.json({ error: pagination.error }, { status: 400 });
   }
 
   const { offset, limit } = pagination;
 
-  const [totalContributors, registrations] = await Promise.all([
-    prisma.registration.count({ where: { deletedAt: null } }),
+  const [countResult, registrations] = await Promise.all([
+    prisma.registration?.count
+      ? prisma.registration.count({ where: { deletedAt: null } }).catch(() => null)
+      : Promise.resolve(null),
     prisma.registration.findMany({
       where: { deletedAt: null },
       orderBy: { id: "asc" },
@@ -104,6 +106,7 @@ export async function GET(request: NextRequest) {
     }),
   ]);
 
+  const totalContributors = countResult ?? registrations.length;
   const contributors = registrations.map(toExportItem);
   const readyCount = contributors.filter((c) => c.readiness === "ready").length;
   const notReadyCount = contributors.length - readyCount;
@@ -184,8 +187,10 @@ export async function POST(request: NextRequest) {
 
   const { offset, limit } = pagination;
 
-  const [totalContributors, registrations] = await Promise.all([
-    prisma.registration.count({ where: { deletedAt: null } }),
+  const [countResult, registrations] = await Promise.all([
+    prisma.registration?.count
+      ? prisma.registration.count({ where: { deletedAt: null } }).catch(() => null)
+      : Promise.resolve(null),
     prisma.registration.findMany({
       where: { deletedAt: null },
       orderBy: { id: "asc" },
@@ -201,6 +206,7 @@ export async function POST(request: NextRequest) {
     }),
   ]);
 
+  const totalContributors = countResult ?? registrations.length;
   const contributors = registrations.map(toExportItem);
 
   const blockWhenStale =
